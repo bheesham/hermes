@@ -1,97 +1,79 @@
 #[macro_use]
 extern crate bitflags;
-extern crate lettre;
 extern crate mio;
 extern crate nom;
-extern crate num_cpus;
 extern crate openssl;
-extern crate threadpool;
 
-use nom::{digit, alpha, alphanumeric,
-          line_ending, space, multispace,
-          IResult};
-
+use mio::{EventLoop, Handler, Sender};
 use openssl::ssl::SslContext;
 use openssl::ssl::SslMethod;
 use openssl::x509::X509FileType;
 use std::path::Path;
-use threadpool::ThreadPool;
 
 bitflags! {
     flags AuthMode: u32 {
-        const PLAIN = 0b00000001,
-        const LOGIN = 0b00000010,
-        const GSSAPI = 0b00000100,
-        const CRAMMD5 = 0b00001000
+        const PLAIN = 1,
+        const LOGIN = 1 << 1,
+        const GSSAPI = 1 << 2,
+        const CRAMMD5 = 1 << 3
     }
 }
 
-struct Hermes {
+struct Server <'ssl> {
     hostname: &'static [u8],
-    tls: SslContext
+    tls: &'ssl mut SslContext
 }
 
-impl Hermes {
-    pub fn new() -> Hermes {
-        let tls: SslContext = match SslContext::new(SslMethod::Tlsv1_2) {
-            Ok(t) => t,
-            Err(_) => panic!("Could not create a context.")
+impl<'ssl> Server<'ssl> {
+    pub fn new<'s>(hostname: &'static str, tls: &'s mut SslContext) -> Result<Server<'s>, String> {
+        match tls.check_private_key() {
+            Ok(_) => {},
+            Err(e) => return Err(format!("{}", e))
         };
 
-        Hermes {
-            hostname: "".as_bytes(),
+        match tls.set_ecdh_auto(true) {
+            Ok(_) => {},
+            Err(e) => return Err(format!("{}", e))
+        };
+
+        Ok(Server {
+            hostname: hostname.as_bytes(),
             tls: tls
-        }
-    }
-
-    pub fn hostname(&mut self, host: &'static [u8]) -> &mut Self {
-        self.hostname = host;
-
-
-
-        self
-    }
-
-    pub fn tls_key <P: AsRef<Path>> (&mut self, key: P) -> &mut Self {
-        match self.tls.set_private_key_file(key, X509FileType::PEM) {
-            Ok(_) => return self,
-            Err(e) => panic!("{}", e)
-        };
-    }
-
-    pub fn tls_chain <P: AsRef<Path>>(&mut self, ca: P) -> &mut Self {
-        match self.tls.set_certificate_chain_file(ca, X509FileType::PEM) {
-            Ok(_) => return self,
-            Err(e) => panic!("{}", e)
-        };
+        })
     }
 
     pub fn start(&mut self) -> Result <(), &'static str> {
-        match self.tls.check_private_key() {
-            Ok(_) => {},
-            Err(e) => panic!("{}", e)
-        };
-
-        match self.tls.set_ecdh_auto(true) {
-            Ok(_) => {},
-            Err(e) => panic!("{}", e)
-        };
-
-        let workers = ThreadPool::new(num_cpus::get());
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use ::Hermes;
+    use ::Server;
     use std::path::Path;
+    use openssl::ssl::{SslContext, SslMethod};
+    use openssl::x509::X509FileType;
 
     #[test]
-    fn hermes() {
-        let mut server: Hermes = Hermes::new();
-        server.hostname("localhost".as_bytes())
-              .tls_key(Path::new("material/ca.noenckey.pem"))
-              .tls_chain(Path::new("material/ca.cert.pem"))
-              .start();
+    fn hermes_normal() {
+        let mut ssl: SslContext = SslContext::new(SslMethod::Tlsv1_2).unwrap();
+        ssl.set_private_key_file(Path::new("material/ca.noenckey.pem"), X509FileType::PEM).unwrap();
+        ssl.set_certificate_chain_file(Path::new("material/ca.cert.pem"), X509FileType::PEM).unwrap();
+
+        let mut server: Server = match Server::new("localhost", &mut ssl) {
+            Ok(s) => s,
+            Err(e) => panic!("{}", e)
+        };
+
+        assert!(server.start().is_ok());
+    }
+
+    #[test]
+    fn hermes_invalid_paths() {
+        let mut ssl: SslContext = SslContext::new(SslMethod::Tlsv1_2).unwrap();
+
+        assert!(ssl.set_private_key_file(Path::new("doesnotexist"), X509FileType::PEM).is_err());
+        assert!(ssl.set_certificate_chain_file(Path::new("doesnotexist"), X509FileType::PEM).is_err());
+        assert!(Server::new("localhost", &mut ssl).is_err());
     }
 }
